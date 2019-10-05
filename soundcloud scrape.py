@@ -11,6 +11,11 @@ import time
 from queue import Queue
 from pymongo import MongoClient
 import sys
+import logging
+
+logging.basicConfig(filename="SC_Logs.log", format='%(asctime)s %(message)s', filemode='w')
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
 
 
 class SoundCloudScraper:
@@ -26,6 +31,7 @@ class SoundCloudScraper:
 		self.track_q_lock = threading.Lock()
 		self.user_db_lock = threading.Lock()
 		self.track_db_lock = threading.Lock()
+		self.threads = []
 
 		self.timeout_time = thread_timeout # set timeout to defualt 10 min
 		self.num_threads = num_threads
@@ -37,20 +43,23 @@ class SoundCloudScraper:
 		num_user_threads = num_track_threads - self.num_threads
 		for thread in range(num_track_threads):
 			t = threading.Thread(target=self.process_tracks) # , arg=(thread,))
-			t.daemon = True
+			t.setDaemon(True)
+			logging.debug(f"Spinning up thread {thread} for tracks")
 			t.start()
 		for thread in range(num_user_threads):
 			t = threading.Thread(target=self.process_users) # , arg=(thread,))
-			t.daemon = True
+			t.setDaemon(True)
+			logging.debug(f"Spinning up thread {thread} for users")
 			t.start()
-
-		while time.time() - self.last_call_time < 30:  # test run for 30 seconds
+		while time.time() - self.last_call_time < 5:  # test run for 30 seconds
 			pass
 		return
 
 	def process_users(self):
+		print("Starting process users")
 		file_processed, timeout_started, timeout_start = False, False, time.time()
 		while 1: # if thread has been sitting empty for 10 minutes, kill
+			logging.debug("Test")
 			if not file_processed and not timeout_started:
 				timeout_start, timeout_started = time.time(), True
 			if not file_processed and time.time() - timeout_start > self.timeout_time:
@@ -64,19 +73,20 @@ class SoundCloudScraper:
 					user = self.user_q.get()  # will be id name or number
 				data = self.build_user_data(user)
 				if not self.user_db.find_one(data['id']):
-					with self.user_db_lock:  # insert user info into database
-						self.user_db.insert_one(data)
+					# with self.user_db_lock:  # insert user info into database
+					self.user_db.insert_one(data)
 					with self.track_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
 						for track in data['favorites']:
-							with self.track_db_lock:
-								if not self.track_db.find_one(track['id']):
-									with self.track_q_lock:
-										self.track_q.put(track['id'])
+							# with self.track_db_lock:
+							if not self.track_db.find_one(track['id']):
+								with self.track_q_lock:
+									self.track_q.put(track['id'])
 
 
 				# process, for all newly found tracks check aginst db before adding to q
 
 	def process_tracks(self):
+		print("Starting process tracks")
 		file_processed, timeout_started, timeout_start = False, False, time.time()
 		while 1: # if thread has been sitting empty for 10 minutes, kill
 			if not file_processed and not timeout_started:
@@ -92,36 +102,35 @@ class SoundCloudScraper:
 					track = self.track_q.get()  # will be id name or number
 				data = self.build_track_data(track)
 				if not self.track_db.find_one(data['id']):
-					with self.track_db_lock:  # insert user info into database
-						self.track_db.insert_one(data)
+					# with self.track_db_lock:  # insert user info into database
+					self.track_db.insert_one(data)
 					with self.user_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
 						for user in data['favoriters']:
-							with self.user_db_lock:
-								if not self.user_db.find_one(user['id']):
-									with self.user_q_lock:
-										self.user_q.put(user['id'])
+							# with self.user_db_lock:
+							if not self.user_db.find_one(user['id']):
+								with self.user_q_lock:
+									self.user_q.put(user['id'])
 
 	def get_user_favorites(self, username):
 		# returns list of sc resource objects
+		logging.debug(f"Querying {username} for favorites")
 		return self.client.get(f'/users/{username}/favorites')
 
 	def get_user_followers(self, username):
 		# returns list of sc resource objects of followers
+		logging.debug(f"Querying {username} for followers")
 		return self.client.get(f'/users/{username}/followers')
 
 	def get_track_favoriters(self, track):
 		# returns list of users who have favorited this track
+		logging.debug(f"Querying {track} for favoriters")
 		return self.client.get(f"/tracks/{track}/favoriters")
-
-	def get_track_info(self, track):
-		#in: track id or name
-		#out: track info object
-		# return self.client.get('')	
-		pass
 
 	def build_user_data(self, username):
 		# username can be id number or name
+		logging.debug(f"Querying {username} for general info")
 		user = self.client.get(f'/users/{username}')
+
 		user_info = user.fields()
 		user_info['favorites'] = self.get_user_favorites(username)  #adding list of all favorited tracks by user
 		user_info['followers'] = self.get_user_followers(username)
@@ -130,6 +139,7 @@ class SoundCloudScraper:
 
 	def build_track_data(self, track):
 		#input track should be id
+		logging.debug(f"Querying {track} for general info")
 		track = self.client.get(f'tracks/{track}')
 		track_info = track.fields()
 		track_info['favoriters'] = self.get_track_favoriters(track)
@@ -138,6 +148,7 @@ class SoundCloudScraper:
 
 if __name__ == "__main__":
 	scraper = SoundCloudScraper(client_id='44287f900da9a7355b99356fe0428da5', client_secret='fde5fba2703158a96554f048688428fe')
-	scraper.user_q.put('162706283')
+	scraper.user_q.put('162706283')  # starting with "full house gaming" for scraping
+	print(scraper.user_q)
 	scraper.start_scraping()
 	sys.exit()
