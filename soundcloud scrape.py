@@ -12,6 +12,8 @@ from queue import Queue
 from pymongo import MongoClient
 import sys
 import logging
+import random
+from celery import Celery
 
 logging.basicConfig(filename="SC_Logs.log", format='%(asctime)s %(message)s', filemode='w')
 logger = logging.getLogger()
@@ -19,7 +21,7 @@ logger.setLevel(logging.DEBUG)
 
 
 class SoundCloudScraper:
-	def __init__(self, client_id, client_secret, num_threads=3, thread_timeout=600, test_timeout=10):
+	def __init__(self, client_id, client_secret, double_threads=3, test_timeout=float('inf'), thread_timeout=10):
 		self.client = soundcloud.Client(client_id=client_id, client_secret=client_secret)
 		self.dbclient = MongoClient()
 		self.db = self.dbclient.sc_scrape
@@ -31,9 +33,12 @@ class SoundCloudScraper:
 		self.track_q_lock = threading.Lock()
 		self.user_db_lock = threading.Lock()
 		self.track_db_lock = threading.Lock()
-		self.num_user_threads = 1
-		self.num_track_threads = 1
+		self.time_lock = threading.Lock()
+		self.last_sc_query = time.time()
+		self.num_user_threads = double_threads
+		self.num_track_threads = double_threads
 		self.threads = []
+		self.test_timeout = test_timeout
 
 		self.timeout_time = thread_timeout # set timeout to defualt 10 min
 
@@ -57,8 +62,14 @@ class SoundCloudScraper:
 			# logging.debug(f"Spinning up thread {thread} for users")
 			t.start()
 			self.threads.append(t)
-		while time.time() - self.last_call_time < 10:  # test run for 30 seconds
-			pass
+		ct = time.time()
+		counter = 0
+		while time.time() - self.last_call_time < self.test_timeout:  # test run for 30 seconds
+			if time.time() - ct > 5:
+				counter += 5
+				logging.debug(f"Users Processed after {counter} seconds: {self.user_db.count()}")
+				ct = time.time()
+				print(f"Users Processed after {counter} seconds: {self.user_db.count()}")
 		return
 
 	def process_users(self):
@@ -89,8 +100,6 @@ class SoundCloudScraper:
 								# with self.track_q_lock:
 								# logging.debug(f"Adding track {track} to track queue")
 								self.track_q.put(track)
-
-
 				# process, for all newly found tracks check aginst db before adding to q
 
 	def process_tracks(self):
@@ -125,25 +134,25 @@ class SoundCloudScraper:
 	def get_user_favorites(self, username):
 		# returns list of sc resource objects
 		logging.debug(f"Querying {username} for favorites")
-		favorites = self.client.get(f'/users/{username}/favorites')
+		favorites = self._sc_get(f'/users/{username}/favorites')
 		return [i.id for i in favorites]
 
 	def get_user_followers(self, username):
 		# returns list of sc resource objects of followers
 		logging.debug(f"Querying {username} for followers")
-		followers = self.client.get(f'/users/{username}/followers')
+		followers = self._sc_get(f'/users/{username}/followers')
 		return [i.id for i in followers.collection]
 
 	def get_track_favoriters(self, track):
 		# returns list of users who have favorited this track
 		logging.debug(f"Querying {track} for favoriters")
-		favoriters = self.client.get(f"/tracks/{track}/favoriters")
+		favoriters = self._sc_get(f"/tracks/{track}/favoriters")
 		return [i.id for i in favoriters]
 
 	def build_user_data(self, username):
 		# username can be id number or name
 		logging.debug(f"Querying {username} for general info")
-		user = self.client.get(f'/users/{username}')
+		user = self._sc_get(f'/users/{username}')
 
 		user_info = user.fields()
 		user_info['favorites'] = self.get_user_favorites(username)  #adding list of all favorited tracks by user
@@ -154,19 +163,20 @@ class SoundCloudScraper:
 	def build_track_data(self, track_id):
 		#input track should be id
 		logging.debug(f"Querying {track_id} for general info")
-		track = self.client.get(f'tracks/{track_id}')
+		track = self._sc_get(f'tracks/{track_id}')
 		track_info = track.fields()
 		track_info['favoriters'] = self.get_track_favoriters(track_id)
 		track_info['_id'] = track_info['id']
 		return track_info
 
+	def _sc_get(self, query):
+		self._delay_query()
+		data = self.client.get(query)
+		return data
 
-if __name__ == "__main__":
-	scraper = SoundCloudScraper(client_id='44287f900da9a7355b99356fe0428da5',
-								client_secret='fde5fba2703158a96554f048688428fe',
-								test_timeout=10)
-	scraper.user_q.put('162706283')  # starting with "full house gaming" for scraping
-	print(scraper.user_q)
-	scraper.start_scraping()
-	# scraper.clear_dbs()
-	sys.exit()
+	def _delay_query(self):
+		time_delay = random.random() * 0.3
+		with self.time_lock:
+			while time.time() - self.last_sc_query < time_delay:
+				pass
+			self.last_sc_query = time.time()
