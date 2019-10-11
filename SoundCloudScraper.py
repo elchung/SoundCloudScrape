@@ -10,7 +10,6 @@ import threading  # using threading instead of processing since most of the dela
 import time
 from queue import Queue
 from pymongo import MongoClient
-import sys
 import logging
 import random
 from celery import Celery
@@ -39,6 +38,9 @@ class SoundCloudScraper:
 		self.num_track_threads = double_threads
 		self.threads = []
 		self.test_timeout = test_timeout
+
+		self.user_q_db = self.db.sc_user_q_db
+		self.track_q_db = self.db.sc_track_q_db
 
 		self.timeout_time = thread_timeout # set timeout to defualt 10 min
 
@@ -131,24 +133,6 @@ class SoundCloudScraper:
 								# logging.debug(f"Adding user {user} to user queue")
 								self.user_q.put(user)
 
-	def get_user_favorites(self, username):
-		# returns list of sc resource objects
-		logging.debug(f"Querying {username} for favorites")
-		favorites = self._sc_get(f'/users/{username}/favorites')
-		return [i.id for i in favorites]
-
-	def get_user_followers(self, username):
-		# returns list of sc resource objects of followers
-		logging.debug(f"Querying {username} for followers")
-		followers = self._sc_get(f'/users/{username}/followers')
-		return [i.id for i in followers.collection]
-
-	def get_track_favoriters(self, track):
-		# returns list of users who have favorited this track
-		logging.debug(f"Querying {track} for favoriters")
-		favoriters = self._sc_get(f"/tracks/{track}/favoriters")
-		return [i.id for i in favoriters]
-
 	def build_user_data(self, username):
 		# username can be id number or name
 		logging.debug(f"Querying {username} for general info")
@@ -168,6 +152,40 @@ class SoundCloudScraper:
 		track_info['favoriters'] = self.get_track_favoriters(track_id)
 		track_info['_id'] = track_info['id']
 		return track_info
+
+	def get_user_favorites(self, username):
+		# returns list of sc resource objects
+		logging.debug(f"Querying {username} for favorites")
+		favorites = self._sc_get(f'/users/{username}/favorites')
+		return [i.id for i in favorites]
+
+	def get_user_followers(self, username):
+		# returns list of sc resource objects of followers
+		logging.debug(f"Querying {username} for followers")
+		followers = self._sc_get(f'/users/{username}/followers')
+		return [i.id for i in followers.collection]
+
+	def get_track_favoriters(self, track):
+		# returns list of users who have favorited this track
+		logging.debug(f"Querying {track} for favoriters")
+		favoriters = self._sc_get(f"/tracks/{track}/favoriters")
+		return [i.id for i in favoriters]
+
+	def find_unused_favorites(self):
+		for user in self.user_db.find():
+			for track in user['favorites']:
+				# track is track id num
+				if not self.track_db.find(track) and not self.track_q_db.find(track):
+					self.track_q_db.insert_one(track)
+	# scan all users and look at favorites, add to queue_db if not in track list
+
+	def find_unused_users(self):
+		for track in self.track_db.find():
+			for user in track['favorites']:
+				# track is track id num
+				if not self.user_db.find(user) and not self.user_q_db.find(user):
+					self.user_q_db.insert_one(user)
+	# scan all tracks and look at favoriters, add to queue_db if not in track list
 
 	def _sc_get(self, query):
 		self._delay_query()
