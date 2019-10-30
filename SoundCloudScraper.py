@@ -46,11 +46,11 @@ class SoundCloudScraper:
         self.timeout_time = thread_timeout # set timeout to defualt 10 min
 
         self.last_call_time = time.time()  # prevent DDoSing soundcloud
-
-    def clear_dbs(self):
-        # test method to clear creatd dbs
-        self.user_db.drop()
-        self.track_db.drop()
+    #
+    # def clear_dbs(self):
+    #     # test method to clear creatd dbs
+    #     self.user_db.drop()
+    #     self.track_db.drop()
 
     def start_scraping(self):
         for thread in range(self.num_track_threads):
@@ -83,16 +83,13 @@ class SoundCloudScraper:
                 timeout_start, timeout_started = time.time(), True
             if not file_processed and time.time() - timeout_start > self.timeout_time:
                 return
-            user = None
-            with self.user_q_lock:
-                if self.user_q.empty():
-                    file_processed = False
-                else:
-                    file_processed, timeout_started = True, False
-                    user = self.user_q.get()  # will be id name or number
-                    logging.debug(f"Processing user {user}")
-            if user:
-                data = self.build_user_data(user)
+            user = self.get_next_user()
+            if not user:
+                file_processed = False
+            else:
+                logging.debug(f"Processing user: {user}")
+                file_processed, timeout_started = True, False
+                data = self.get_user_data(user)
                 if not self.user_db.find_one(data['id']):
                     # with self.user_db_lock:  # insert user info into database
                     self.user_db.insert_one(data)
@@ -103,7 +100,6 @@ class SoundCloudScraper:
                                 # with self.track_q_lock:
                                 # logging.debug(f"Adding track {track} to track queue")
                                 self.track_q.put(track)
-                # process, for all newly found tracks check aginst db before adding to q
 
     def process_tracks(self):
         print("Starting process tracks")
@@ -111,18 +107,15 @@ class SoundCloudScraper:
         while 1: # if thread has been sitting empty for 10 minutes, kill
             if not file_processed and not timeout_started:
                 timeout_start, timeout_started = time.time(), True
-            if not file_processed and time.time() - timeout_start > self.timeout_time:
+            if not file_processed and time.time() - timeout_start > self.timeout_time:  
                 return
-            track = None
-            with self.track_q_lock:
-                if self.track_q.empty():
-                    file_processed = False
-                else:
-                    file_processed, timeout_started = True, False
-                    track = self.track_q.get()  # will be id name or number
-                    logging.debug(f"Processing track {track}")
+            track = self.get_next_track()
+            if not track:
+                file_processed = False
             if track:
-                data = self.build_track_data(track)
+                file_processed, timeout_started = True, False
+                logging.debug(f"Processing track {track}")
+                data = self.get_track_data(track)
                 if not self.track_db.find_one(data['id']):
                     # with self.track_db_lock:  # insert user info into database
                     self.track_db.insert_one(data)
@@ -133,8 +126,21 @@ class SoundCloudScraper:
                                 # with self.user_q_lock:
                                 # logging.debug(f"Adding user {user} to user queue")
                                 self.user_q.put(user)
+    def get_next_user(self):
+        # finds and retrieves user from queue, dropping it. returns none if no user
+        with self.user_q_lock:
+            user = self.user_q_db.find_one()
+            if user: self.user_q_db.delete_one(user)
+        return user["_id"] if user else user
 
-    def build_user_data(self, username):
+    def get_next_track(self):
+        # finds and retrieves user from queue, dropping it. returns none if no user
+        with self.track_q_lock:
+            track = self.track_q_db.find_one()
+            if track: self.track_q_db.delete_one(track)
+        return track["_id"] if track else track
+
+    def get_user_data(self, username):
         # username can be id number or name
         logging.debug(f"Querying {username} for general info")
         user = self._sc_get(f'/users/{username}')
@@ -145,7 +151,7 @@ class SoundCloudScraper:
         user_info['_id'] = user_info['id']
         return user_info
 
-    def build_track_data(self, track_id):
+    def get_track_data(self, track_id):
         #input track should be id
         logging.debug(f"Querying {track_id} for general info")
         track = self._sc_get(f'tracks/{track_id}')
@@ -172,23 +178,23 @@ class SoundCloudScraper:
         favoriters = self._sc_get(f"/tracks/{track}/favoriters")
         return [i.id for i in favoriters]
 
+    # scan all users and look at favorites, add to queue_db if not in track list
     def find_unused_favorites(self):
         for user in self.user_db.find():
             for track in user['favorites']:
                 # track is track id num
-                if not self.track_db.find(track) and not self.track_q_db.find(track):
+                if not self.track_db.find_one({"_id":track}) and not self.track_q_db.find_one({"_id":track}):
                     logging.debug(f"Adding {track} to User queue db")
-                    self.track_q_db.insert_one(track)
-    # scan all users and look at favorites, add to queue_db if not in track list
+                    self.track_q_db.insert_one({"_id":track})
 
+    # scan all tracks and look at favoriters, add to queue_db if not in track list
     def find_unused_users(self):
         for track in self.track_db.find():
-            for user in track['favorites']:
+            for user in track['favoriters']:
                 # track is track id num
-                if not self.user_db.find(user) and not self.user_q_db.find(user):
+                if not self.user_db.find_one({"_id":user}) and not self.user_q_db.find_one({"_id":user}):
                     logging.debug(f"Adding {user} to User queue db")
-                    self.user_q_db.insert_one(user)
-    # scan all tracks and look at favoriters, add to queue_db if not in track list
+                    self.user_q_db.insert_one({"_id":user})
 
     def _sc_get(self, query):
         self._delay_query()
@@ -207,5 +213,5 @@ if __name__ == "__main__":
     scraper = SoundCloudScraper(client_id='44287f900da9a7355b99356fe0428da5',
                                 client_secret='fde5fba2703158a96554f048688428fe',
                                 double_threads=10)
-    scraper.find_unused_favorites()
+    # scraper.find_unused_favorites()
     scraper.find_unused_users()
