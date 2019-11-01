@@ -17,7 +17,7 @@ from celery import Celery
 # logging.basicConfig(filename="SC_Logs.log", format='%(asctime)s %(message)s', filemode='w')
 logging.basicConfig()
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 class SoundCloudScraper:
@@ -56,13 +56,13 @@ class SoundCloudScraper:
         for thread in range(self.num_track_threads):
             t = threading.Thread(target=self.process_tracks) # , arg=(thread,))
             t.setDaemon(True)
-            # logging.debug(f"Spinning up thread {thread} for tracks")
+            logging.debug(f"Spinning up thread {thread} for tracks")
             t.start()
             self.threads.append(t)
         for thread in range(self.num_user_threads):
             t = threading.Thread(target=self.process_users) # , arg=(thread,))
             t.setDaemon(True)
-            # logging.debug(f"Spinning up thread {thread} for users")
+            logging.debug(f"Spinning up thread {thread} for users")
             t.start()
             self.threads.append(t)
         ct = time.time()
@@ -70,7 +70,7 @@ class SoundCloudScraper:
         while time.time() - self.last_call_time < self.test_timeout:  # test run for 30 seconds
             if time.time() - ct > 5:
                 counter += 5
-                logging.debug(f"Users Processed after {counter} seconds: {self.user_db.count()}")
+                logging.info(f"Users Processed after {counter} seconds: {self.user_db.count()}")
                 ct = time.time()
                 print(f"Users Processed after {counter} seconds: {self.user_db.count()}")
         return
@@ -87,7 +87,7 @@ class SoundCloudScraper:
             if not user:
                 file_processed = False
             else:
-                logging.debug(f"Processing user: {user}")
+                logging.info(f"Processing user: {user}")
                 file_processed, timeout_started = True, False
                 data = self.get_user_data(user)
                 if not self.user_db.find_one(data['id']):
@@ -96,23 +96,24 @@ class SoundCloudScraper:
                     with self.track_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
                         for track in data['favorites']:  # tracks in data['favorites'] are saved as int ids
                             # with self.track_db_lock:
-                            if not self.track_db.find_one(track):
+                            if not self.track_db.find_one(track) and not self.track_q_db.find_one(track):
                                 # with self.track_q_lock:
                                 # logging.debug(f"Adding track {track} to track queue")
-                                self.track_q.put(track)
+                                self.track_q_db.insert_one({"_id":track})
 
     def process_tracks(self):
         print("Starting process tracks")
         file_processed, timeout_started, timeout_start = False, False, time.time()
         while 1: # if thread has been sitting empty for 10 minutes, kill
             if not file_processed and not timeout_started:
-                timeout_start, timeout_started = time.time(), True
-            if not file_processed and time.time() - timeout_start > self.timeout_time:  
+                timeout_start = time.time()
+                timeout_started = True
+            if not file_processed and time.time()-timeout_start > self.timeout_time:
                 return
             track = self.get_next_track()
             if not track:
                 file_processed = False
-            if track:
+            else:
                 file_processed, timeout_started = True, False
                 logging.debug(f"Processing track {track}")
                 data = self.get_track_data(track)
@@ -122,10 +123,10 @@ class SoundCloudScraper:
                     with self.user_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
                         for user in data['favoriters']:
                             # with self.user_db_lock:
-                            if not self.user_db.find_one(user):
+                            if not self.user_db.find_one(user) and not self.user_q_db.find_one(user):
                                 # with self.user_q_lock:
                                 # logging.debug(f"Adding user {user} to user queue")
-                                self.user_q.put(user)
+                                self.user_q_db.insert_one({"_id":user})
     def get_next_user(self):
         # finds and retrieves user from queue, dropping it. returns none if no user
         with self.user_q_lock:
@@ -214,4 +215,4 @@ if __name__ == "__main__":
                                 client_secret='fde5fba2703158a96554f048688428fe',
                                 double_threads=10)
     # scraper.find_unused_favorites()
-    scraper.find_unused_users()
+    scraper.start_scraping()
