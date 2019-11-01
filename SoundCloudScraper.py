@@ -12,7 +12,6 @@ from queue import Queue
 from pymongo import MongoClient
 import logging
 import random
-from celery import Celery
 
 # logging.basicConfig(filename="SC_Logs.log", format='%(asctime)s %(message)s', filemode='w')
 logging.basicConfig()
@@ -43,24 +42,24 @@ class SoundCloudScraper:
         self.user_q_db = self.db.sc_user_q_db
         self.track_q_db = self.db.sc_track_q_db
 
-        self.timeout_time = thread_timeout # set timeout to defualt 10 min
+        self.timeout_time = thread_timeout  # set timeout to default 10 min
 
-        self.last_call_time = time.time()  # prevent DDoSing soundcloud
+        self.last_call_time = time.time()  # prevent DDoSing SoundCloud
     #
     # def clear_dbs(self):
-    #     # test method to clear creatd dbs
+    #     # test method to clear created dbs
     #     self.user_db.drop()
     #     self.track_db.drop()
 
     def start_scraping(self):
         for thread in range(self.num_track_threads):
-            t = threading.Thread(target=self.process_tracks) # , arg=(thread,))
+            t = threading.Thread(target=self.process_tracks)  # , arg=(thread,))
             t.setDaemon(True)
             logging.debug(f"Spinning up thread {thread} for tracks")
             t.start()
             self.threads.append(t)
         for thread in range(self.num_user_threads):
-            t = threading.Thread(target=self.process_users) # , arg=(thread,))
+            t = threading.Thread(target=self.process_users)  # , arg=(thread,))
             t.setDaemon(True)
             logging.debug(f"Spinning up thread {thread} for users")
             t.start()
@@ -77,62 +76,57 @@ class SoundCloudScraper:
 
     def process_users(self):
         print("Starting process users")
-        file_processed, timeout_started, timeout_start = False, False, time.time()
-        while 1: # if thread has been sitting empty for 10 minutes, kill
-            if not file_processed and not timeout_started:
-                timeout_start, timeout_started = time.time(), True
-            if not file_processed and time.time() - timeout_start > self.timeout_time:
+        file_processed, timeout_start = False, time.time()
+        while 1:  # if thread has been sitting empty for 10 minutes, kill
+            if file_processed:
+                timeout_start = time.time()  # reset timeout time if new file processed in this thread
+            elif time.time() - timeout_start >= self.timeout_time:
                 return
+
             user = self.get_next_user()
             if not user:
                 file_processed = False
             else:
                 logging.info(f"Processing user: {user}")
-                file_processed, timeout_started = True, False
+                file_processed = True
                 data = self.get_user_data(user)
-                if not self.user_db.find_one(data['id']):
-                    # with self.user_db_lock:  # insert user info into database
+                with self.user_db_lock:
                     self.user_db.insert_one(data)
-                    with self.track_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
-                        for track in data['favorites']:  # tracks in data['favorites'] are saved as int ids
-                            # with self.track_db_lock:
-                            if not self.track_db.find_one(track) and not self.track_q_db.find_one(track):
-                                # with self.track_q_lock:
-                                # logging.debug(f"Adding track {track} to track queue")
-                                self.track_q_db.insert_one({"_id":track})
+                with self.track_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
+                    for track in data['favorites']:  # tracks in data['favorites'] are saved as int ids
+                        if not self.track_db.find_one({"_id": track}) and not self.track_q_db.find_one({"_id": track}):  # if not in track database and q
+                            logging.info(f"Adding track {track} to track queue")
+                            self.track_q_db.insert_one({"_id": track})
 
     def process_tracks(self):
         print("Starting process tracks")
-        file_processed, timeout_started, timeout_start = False, False, time.time()
-        while 1: # if thread has been sitting empty for 10 minutes, kill
-            if not file_processed and not timeout_started:
+        file_processed, timeout_start = False, time.time()
+        while 1:  # if thread has been sitting empty for 10 minutes, kill
+            if file_processed:
                 timeout_start = time.time()
-                timeout_started = True
-            if not file_processed and time.time()-timeout_start > self.timeout_time:
+            elif time.time() - timeout_start >= self.timeout_time:
                 return
+
             track = self.get_next_track()
             if not track:
                 file_processed = False
             else:
-                file_processed, timeout_started = True, False
                 logging.debug(f"Processing track {track}")
+                file_processed = True
                 data = self.get_track_data(track)
-                if not self.track_db.find_one(data['id']):
-                    # with self.track_db_lock:  # insert user info into database
+                with self.track_db_lock:  # insert user info into database
                     self.track_db.insert_one(data)
-                    with self.user_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
-                        for user in data['favoriters']:
-                            # with self.user_db_lock:
-                            if not self.user_db.find_one(user) and not self.user_q_db.find_one(user):
-                                # with self.user_q_lock:
-                                # logging.debug(f"Adding user {user} to user queue")
-                                self.user_q_db.insert_one({"_id":user})
+                with self.user_q_lock:  # get all favorited tracks by user and put unprocessed tracks into queue
+                    for user in data['favoriters']:
+                        if not self.user_db.find_one({"_id": user}) and not self.user_q_db.find_one({"_id": user}):
+                            logging.info(f"Adding user {user} to user queue")
+                            self.user_q_db.insert_one({"_id": user})
     def get_next_user(self):
-        # finds and retrieves user from queue, dropping it. returns none if no user
+        # finds and retrieves user from queue, dropping it. returns None if no user
         with self.user_q_lock:
             user = self.user_q_db.find_one()
             if user: self.user_q_db.delete_one(user)
-        return user["_id"] if user else user
+        return user["_id"] if user else user  # else None, same thing
 
     def get_next_track(self):
         # finds and retrieves user from queue, dropping it. returns none if no user
